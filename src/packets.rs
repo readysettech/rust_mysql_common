@@ -313,25 +313,27 @@ impl<'a> OkPacket<'a> {
                 let status_flags = StatusFlags::from_bits_truncate(payload.read_u16::<LE>()?);
                 let warnings = payload.read_u16::<LE>()?;
 
-                let (info, session_state_info) =
-                    if capabilities.contains(CapabilityFlags::CLIENT_SESSION_TRACK) {
-                        let info = read_lenenc_str!(&mut payload)?;
-                        let session_state_info =
-                            if status_flags.contains(StatusFlags::SERVER_SESSION_STATE_CHANGED) {
-                                read_lenenc_str!(&mut payload)?
-                            } else {
-                                &[][..]
-                            };
-                        (info, session_state_info)
-                    } else if !payload.is_empty() && payload[0] > 0 {
-                        // The `info` field is a `string<EOF>` according to the MySQL Internals
-                        // Manual, but actually it's a `string<lenenc>`.
-                        // SEE: sql/protocol_classics.cc `net_send_ok`
-                        let info = read_lenenc_str!(&mut payload)?;
-                        (info, &[][..])
-                    } else {
-                        (&[][..], &[][..])
-                    };
+                let (info, session_state_info) = if capabilities
+                    .contains(CapabilityFlags::CLIENT_SESSION_TRACK)
+                    && !payload.is_empty()
+                {
+                    let info = read_lenenc_str!(&mut payload)?;
+                    let session_state_info =
+                        if status_flags.contains(StatusFlags::SERVER_SESSION_STATE_CHANGED) {
+                            read_lenenc_str!(&mut payload)?
+                        } else {
+                            &[][..]
+                        };
+                    (info, session_state_info)
+                } else if !payload.is_empty() && payload[0] > 0 {
+                    // The `info` field is a `string<EOF>` according to the MySQL Internals
+                    // Manual, but actually it's a `string<lenenc>`.
+                    // SEE: sql/protocol_classics.cc `net_send_ok`
+                    let info = read_lenenc_str!(&mut payload)?;
+                    (info, &[][..])
+                } else {
+                    (&[][..], &[][..])
+                };
                 (
                     affected_rows,
                     last_insert_id,
@@ -1624,7 +1626,7 @@ mod test {
 
     #[test]
     fn should_parse_ok_packet() {
-        const PLAIN_OK: &[u8] = b"\x00\x00\x00\x02\x00\x00\x00";
+        const PLAIN_OK: &[u8] = b"\x00\x01\x00\x02\x00\x00\x00";
         const SESS_STATE_SYS_VAR_OK: &[u8] =
             b"\x00\x00\x00\x02\x40\x00\x00\x00\x11\x00\x0f\x0a\x61\
               \x75\x74\x6f\x63\x6f\x6d\x6d\x69\x74\x03\x4f\x46\x46";
@@ -1643,7 +1645,23 @@ mod test {
 
         let ok_packet =
             parse_ok_packet(PLAIN_OK, CapabilityFlags::empty(), OkPacketKind::Other).unwrap();
-        assert_eq!(ok_packet.affected_rows(), 0);
+        assert_eq!(ok_packet.affected_rows(), 1);
+        assert_eq!(ok_packet.last_insert_id(), None);
+        assert_eq!(
+            ok_packet.status_flags(),
+            StatusFlags::SERVER_STATUS_AUTOCOMMIT
+        );
+        assert_eq!(ok_packet.warnings(), 0);
+        assert_eq!(ok_packet.info_ref(), None);
+        assert_eq!(ok_packet.session_state_info(), None);
+
+        let ok_packet = parse_ok_packet(
+            PLAIN_OK,
+            CapabilityFlags::CLIENT_SESSION_TRACK,
+            OkPacketKind::Other,
+        )
+        .unwrap();
+        assert_eq!(ok_packet.affected_rows(), 1);
         assert_eq!(ok_packet.last_insert_id(), None);
         assert_eq!(
             ok_packet.status_flags(),
